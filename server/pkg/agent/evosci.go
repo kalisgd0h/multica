@@ -56,10 +56,21 @@ func (b *evosciBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	timeout := opts.Timeout
 	runCtx, cancel := runContext(ctx, timeout)
 
+	// The runtime brief (workflow steps + agent identity + CLI catalog) must
+	// reach EvoScientist inline: unlike Claude/Hermes it does not read the
+	// workdir context files, so without this it misses the workflow — notably
+	// step 8, "when done, set status in_review" — and defaults to marking the
+	// issue done. Prepend it to the prompt, matching the kimi/kiro/traecli
+	// backends. Requires evosci in providerNeedsInlineSystemPrompt.
+	promptText := prompt
+	if opts.SystemPrompt != "" {
+		promptText = opts.SystemPrompt + "\n\n---\n\n" + prompt
+	}
+
 	// --dangerous drops EvoScientist's workspace confinement so absolute paths
 	// hit the real filesystem like the rest of the fleet (see the type doc).
 	// It implies auto-approve, which --auto-mode already sets.
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--auto-mode", "--dangerous"}
+	args := []string{"-p", promptText, "--output-format", "stream-json", "--auto-mode", "--dangerous"}
 	// Anchor EvoScientist's per-task workspace at the daemon's task workdir.
 	// --workdir is mutually exclusive with --mode/--use-cwd, which is why those
 	// are blocked above.
