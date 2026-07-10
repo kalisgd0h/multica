@@ -19,6 +19,7 @@ var evosciBlockedArgs = map[string]blockedArgMode{
 	"--prompt":        blockedWithValue,  // alias of -p
 	"--output-format": blockedWithValue,  // stream-json protocol for daemon parsing
 	"--auto-mode":     blockedStandalone, // unattended: no approval / ask_user prompts
+	"--dangerous":     blockedStandalone, // real-filesystem access; daemon sets it for fleet parity
 	"--workdir":       blockedWithValue,  // task workdir anchor
 	"--use-cwd":       blockedStandalone, // conflicts with --workdir
 	"--mode":          blockedWithValue,  // conflicts with --workdir
@@ -26,10 +27,17 @@ var evosciBlockedArgs = map[string]blockedArgMode{
 }
 
 // evosciBackend implements Backend by spawning
-// `EvoSci -p <prompt> --output-format stream-json --auto-mode --workdir <cwd>`
+// `EvoSci -p <prompt> --output-format stream-json --auto-mode --dangerous --workdir <cwd>`
 // and reading EvoScientist's native flat JSONL event stream from stdout — one
 // self-describing JSON object per line. See the EvoScientist docs/stream-json.md
 // contract for the event schema.
+//
+// --dangerous disables EvoScientist's workspace confinement so it operates on
+// the real filesystem, matching every other Multica backend (claude, codex,
+// copilot, opencode, cursor, … all run unconfined + auto-approve headlessly).
+// Without it EvoScientist uniquely remaps absolute paths under --workdir (strips
+// the leading "/"), so files the agent "saves" to an absolute path silently land
+// inside the throwaway task workdir instead of the real target.
 type evosciBackend struct {
 	cfg Config
 }
@@ -48,7 +56,10 @@ func (b *evosciBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	timeout := opts.Timeout
 	runCtx, cancel := runContext(ctx, timeout)
 
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--auto-mode"}
+	// --dangerous drops EvoScientist's workspace confinement so absolute paths
+	// hit the real filesystem like the rest of the fleet (see the type doc).
+	// It implies auto-approve, which --auto-mode already sets.
+	args := []string{"-p", prompt, "--output-format", "stream-json", "--auto-mode", "--dangerous"}
 	// Anchor EvoScientist's per-task workspace at the daemon's task workdir.
 	// --workdir is mutually exclusive with --mode/--use-cwd, which is why those
 	// are blocked above.
