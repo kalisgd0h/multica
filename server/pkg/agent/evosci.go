@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -101,7 +103,12 @@ func (b *evosciBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		cancel()
 		return nil, fmt.Errorf("evosci stdout pipe: %w", err)
 	}
-	cmd.Stderr = newLogWriter(b.cfg.Logger, "[evosci:stderr] ")
+	// EvoScientist prints its resume hint ("EvoSci --resume <id>") only to
+	// stderr at end-of-run, never as a stream-json event. Tee stderr through a
+	// capturer so we can recover <id> and record it as the session pointer, so a
+	// follow-up turn resumes the thread instead of starting fresh.
+	stderrCap := &evosciStderrCapture{inner: newLogWriter(b.cfg.Logger, "[evosci:stderr] ")}
+	cmd.Stderr = stderrCap
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -158,11 +165,53 @@ func (b *evosciBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 			Output:     scanResult.output,
 			Error:      scanResult.errMsg,
 			DurationMs: duration.Milliseconds(),
+			SessionID:  stderrCap.sessionID(),
 			Usage:      usage,
 		}
 	}()
 
 	return &Session{Messages: msgCh, Result: resCh}, nil
+}
+
+// evosciResumeRe matches EvoScientist's end-of-run resume hint, e.g.
+// "EvoSci --resume cb9659bd" (also plain "--resume <id>").
+var evosciResumeRe = regexp.MustCompile(`--resume\s+(\S+)`)
+
+// evosciStderrTailCap bounds how much recent stderr we retain for resume-id
+// extraction. The hint is emitted at the very end, so a small tail suffices
+// while ignoring the noisy banners/warnings earlier in the stream.
+const evosciStderrTailCap = 8 * 1024
+
+// evosciStderrCapture tees the agent's stderr to inner (the daemon log) while
+// retaining a bounded tail so the last "--resume <id>" can be recovered after
+// the process exits. Writes arrive from the exec copy goroutine, so access is
+// mutex-guarded.
+type evosciStderrCapture struct {
+	inner io.Writer
+	mu    sync.Mutex
+	tail  []byte
+}
+
+func (w *evosciStderrCapture) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.tail = append(w.tail, p...)
+	if len(w.tail) > evosciStderrTailCap {
+		w.tail = w.tail[len(w.tail)-evosciStderrTailCap:]
+	}
+	w.mu.Unlock()
+	return w.inner.Write(p)
+}
+
+// sessionID returns the last resume id seen on stderr, or "" if none. Safe to
+// call after the process exits (the resume hint is an end-of-run message).
+func (w *evosciStderrCapture) sessionID() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	matches := evosciResumeRe.FindAllSubmatch(w.tail, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return string(matches[len(matches)-1][1])
 }
 
 // evosciResult holds the accumulated state from processing the event stream.

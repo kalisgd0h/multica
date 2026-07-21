@@ -1,10 +1,57 @@
 package agent
 
 import (
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
 )
+
+func TestEvosciStderrCaptureExtractsResumeID(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{
+			name:   "resume hint on its own line",
+			writes: []string{"Loading agent...\n", "Goodbye!\nResume this session with:\nEvoSci --resume cb9659bd\n"},
+			want:   "cb9659bd",
+		},
+		{
+			name:   "hint split across writes",
+			writes: []string{"EvoSci --res", "ume abc123\n"},
+			want:   "abc123",
+		},
+		{
+			name:   "last resume id wins",
+			writes: []string{"EvoSci --resume old111\n", "EvoSci --resume new222\n"},
+			want:   "new222",
+		},
+		{
+			name:   "no resume hint",
+			writes: []string{"just some warnings\nContext7 MCP running\n"},
+			want:   "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := &evosciStderrCapture{inner: io.Discard}
+			for _, chunk := range tc.writes {
+				if _, err := w.Write([]byte(chunk)); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if got := w.sessionID(); got != tc.want {
+				t.Errorf("sessionID(): got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestNewReturnsEvosciBackend(t *testing.T) {
 	t.Parallel()
